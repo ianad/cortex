@@ -211,12 +211,9 @@ watch(() => addSectionForm.title, (newTitle) => {
 
 // Utility function to clean dashboard data for API requests
 function cleanDashboardForUpdate(dashboard: any): any {
-  console.log('Dashboard before cleaning:', dashboard)
-  
   const cleaned = {
     ...dashboard,
     views: dashboard.views?.map((view: any) => {
-      console.log('Processing view:', view)
       // Generate view alias if missing
       const viewAlias = view.alias || generateAlias(view.title || view.name || `view_${Date.now()}`)
       
@@ -227,7 +224,6 @@ function cleanDashboardForUpdate(dashboard: any): any {
         context_id: view.context_id,
         layout: view.layout,
         sections: view.sections?.map((section: any) => {
-          console.log('Processing section:', section)
           // Handle both old (id) and new (alias) section structures
           const sectionAlias = section.alias || generateAlias(section.title || `section_${Date.now()}`)
           
@@ -300,18 +296,15 @@ function cleanDashboardForUpdate(dashboard: any): any {
               return cleanedWidget
             }) || []
           }
-          
-          console.log('Cleaned section:', cleanedSection)
+
           return cleanedSection
         }) || []
       }
       
-      console.log('Cleaned view:', cleanedView)
       return cleanedView
     }) || []
   }
-  
-  console.log('Dashboard after cleaning:', cleaned)
+
   return cleaned
 }
 
@@ -440,7 +433,6 @@ async function handleDeleteView(view: DashboardView) {
     toast.success('View deleted successfully')
     await loadDashboard()
   } catch (err: any) {
-    console.error('Failed to delete view:', err)
     toast.error(err?.message || 'Failed to delete view')
   }
 }
@@ -469,7 +461,6 @@ async function addSection() {
   
   // Check if alias already exists in current view
   const existingSections = mutable.views[viewIndex]?.sections ?? []
-  console.log('Existing sections before adding:', existingSections)
   
   // Check for alias conflicts (handle both old id and new alias structures)
   if (existingSections.some(s => (s.alias && s.alias === alias) || (s.title && generateAlias(s.title) === alias))) {
@@ -538,7 +529,6 @@ function editDashboard() {
 async function handleFiltersChanged() {
   if (!currentView.value || !currentDashboard.value) return
 
-  console.log('[Dashboard] Filters changed - triggering widget refresh with filters')
   isFilterExecuting.value = true
 
   try {
@@ -564,7 +554,6 @@ async function handleFiltersChanged() {
           is_active: f.is_active
         }))
 
-        console.log(`[Dashboard] Executing widget ${widget.alias} with ${filters.length} filters`)
 
         // Create a promise for this widget's execution
         const executePromise = (async () => {
@@ -578,8 +567,7 @@ async function handleFiltersChanged() {
 
             // Update widget data in local state
             updateWidgetData(widget.alias, result.data)
-          } catch (error) {
-            console.error(`Failed to execute widget ${widget.alias}:`, error)
+          } catch (_error) {
             // Don't throw - we want other widgets to continue executing
           }
         })()
@@ -591,14 +579,8 @@ async function handleFiltersChanged() {
     // Wait for all widget executions to complete
     await Promise.all(executionPromises)
 
-    // Increment refresh key to trigger ViewWidget re-renders
-    // This ensures widgets that didn't have filters still refresh properly
-    refreshKey.value++
-
     lastExecutionTime.value = new Date().toLocaleTimeString()
-    console.log('[Dashboard] All widgets refreshed with filters')
-  } catch (error) {
-    console.error('[Dashboard] Error refreshing widgets with filters:', error)
+  } catch (err) {
     toast.error('Failed to apply filters to some widgets')
   } finally {
     isFilterExecuting.value = false
