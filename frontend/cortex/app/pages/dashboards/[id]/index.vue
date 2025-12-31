@@ -19,6 +19,8 @@ import DashboardContainer from '~/components/dashboards/DashboardContainer.vue'
 import WidgetEditSheet from '~/components/dashboards/WidgetEditSheet.vue'
 import DashboardViewSelector from '~/components/dashboards/DashboardViewSelector.vue'
 import DashboardViewUpsert from '~/components/dashboards/DashboardViewUpsert.vue'
+import FilterPanel from '~/components/filters/FilterPanel.vue'
+import type { ColumnInfo } from '~/components/filters/FilterEditor.vue'
 
 // Page metadata
 definePageMeta({
@@ -48,6 +50,86 @@ const { selectedEnvironmentId } = useEnvironments()
 
 // Metrics count for dynamic tab ordering in inline widget editor
 const metricsCount = computed(() => metrics.value?.length || 0)
+
+// Available columns for FilterPanel - extract unique dimension fields from widget configurations
+const availableColumns = computed<ColumnInfo[]>(() => {
+  const columns: ColumnInfo[] = []
+  const seenFields = new Set<string>()
+
+  if (!currentView.value) return columns
+
+  // Iterate through all sections and widgets to extract dimension fields
+  for (const section of currentView.value.sections || []) {
+    for (const widget of section.widgets || []) {
+      const dataMapping = widget.visualization?.data_mapping
+      if (!dataMapping) continue
+
+      // Extract x_axis field (typically a dimension)
+      if (dataMapping.x_axis?.field && !seenFields.has(dataMapping.x_axis.field)) {
+        seenFields.add(dataMapping.x_axis.field)
+        columns.push({
+          name: dataMapping.x_axis.field,
+          type: dataMapping.x_axis.data_type || 'string'
+        })
+      }
+
+      // Extract category_field (dimension for pie/donut charts)
+      if (dataMapping.category_field?.field && !seenFields.has(dataMapping.category_field.field)) {
+        seenFields.add(dataMapping.category_field.field)
+        columns.push({
+          name: dataMapping.category_field.field,
+          type: dataMapping.category_field.data_type || 'categorical'
+        })
+      }
+
+      // Extract series_field (dimension for multi-series charts)
+      if (dataMapping.series_field?.field && !seenFields.has(dataMapping.series_field.field)) {
+        seenFields.add(dataMapping.series_field.field)
+        columns.push({
+          name: dataMapping.series_field.field,
+          type: dataMapping.series_field.data_type || 'categorical'
+        })
+      }
+
+      // Extract y_axes fields (measures - can also be filtered)
+      if (Array.isArray(dataMapping.y_axes)) {
+        for (const yAxis of dataMapping.y_axes) {
+          if (yAxis.field && !seenFields.has(yAxis.field)) {
+            seenFields.add(yAxis.field)
+            columns.push({
+              name: yAxis.field,
+              type: yAxis.data_type || 'number'
+            })
+          }
+        }
+      }
+
+      // Extract value_field (for single value widgets)
+      if (dataMapping.value_field?.field && !seenFields.has(dataMapping.value_field.field)) {
+        seenFields.add(dataMapping.value_field.field)
+        columns.push({
+          name: dataMapping.value_field.field,
+          type: dataMapping.value_field.data_type || 'number'
+        })
+      }
+
+      // Extract table columns
+      if (Array.isArray(dataMapping.columns)) {
+        for (const col of dataMapping.columns) {
+          if (col.field && !seenFields.has(col.field)) {
+            seenFields.add(col.field)
+            columns.push({
+              name: col.field,
+              type: 'string' // Table columns don't have explicit type in ColumnMapping
+            })
+          }
+        }
+      }
+    }
+  }
+
+  return columns
+})
 
 // Component state
 const selectedViewId = ref<string>('')
@@ -414,6 +496,19 @@ function editDashboard() {
   toast.info('Edit functionality coming soon')
 }
 
+/**
+ * Handle filters changed event from FilterPanel
+ * This is a stub for now - Task 11 will implement the full logic
+ * to refresh widgets with the new filters
+ */
+function handleFiltersChanged() {
+  console.log('[Dashboard] Filters changed - will trigger widget refresh in Task 11')
+  // TODO: Task 11 will implement:
+  // 1. Get the current filter context
+  // 2. Trigger refresh of all widgets with the new filters
+  // 3. Use executeWidgetWithFilters for each widget
+}
+
 function goBack() {
   router.push('/dashboards')
 }
@@ -527,6 +622,14 @@ useHead({
       </div>
     </div>
 
+    <!-- Filter Panel -->
+    <FilterPanel
+      v-if="currentDashboard && currentView"
+      :dashboard-id="currentDashboard.id"
+      :view-alias="currentView.alias"
+      :available-columns="availableColumns"
+      @filters-changed="handleFiltersChanged"
+    />
 
     <!-- Loading State -->
     <div v-if="loading" class="flex items-center justify-center py-12">
