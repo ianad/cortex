@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref, watch, computed } from 'vue'
+import { onMounted, ref, watch, computed, inject } from 'vue'
 import { useDashboards } from '~/composables/useDashboards'
+import { useFilterContext } from '~/composables/useFilterContext'
 import ChartRenderer from './ChartRenderer.vue'
 import { Toggle } from '@/components/ui/toggle'
 import {
@@ -31,7 +32,10 @@ interface Emits {
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
 
-const { executeWidget, deleteWidget } = useDashboards()
+const { executeWidget, executeWidgetWithFilters, deleteWidget } = useDashboards()
+
+// Inject filter context from parent dashboard page (if available)
+const injectedFilterContext = inject<ReturnType<typeof useFilterContext> | null>('filterContext', null)
 
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -45,7 +49,45 @@ async function load() {
     loading.value = true
     error.value = null
     data.value = null
-    const res = await executeWidget(props.dashboardId, props.viewAlias, props.widget.alias)
+
+    // Check if we have a filter context and if there are active filters
+    // The injected filter context is a computed ref that returns useFilterContext result
+    // We need to unwrap the computed (.value) to get the actual filter context object
+    const filterCtxComputed = injectedFilterContext as any
+    const filterCtx = filterCtxComputed?.value
+    const semanticFilters = filterCtx?.getFiltersForApi?.(props.widget.alias) || []
+
+    // Transform SemanticFilter format to executeWidgetWithFilters format
+    // SemanticFilter uses 'name'/'query' while the API expects 'dimension'
+    const filters = semanticFilters.map((f: any) => ({
+      dimension: f.name || f.query,
+      operator: f.operator || 'equals',
+      value: f.value,
+      values: f.values,
+      min_value: f.min_value,
+      max_value: f.max_value,
+      table: f.table,
+      value_type: f.value_type,
+      filter_type: f.filter_type,
+      is_active: f.is_active
+    }))
+
+    let res: any
+
+    if (filters.length > 0) {
+      // Execute with filters
+      console.log(`[ViewWidget] Executing ${props.widget.alias} with ${filters.length} filters`)
+      res = await executeWidgetWithFilters(
+        props.dashboardId,
+        props.viewAlias,
+        props.widget.alias,
+        filters
+      )
+    } else {
+      // Execute without filters (standard execution)
+      res = await executeWidget(props.dashboardId, props.viewAlias, props.widget.alias)
+    }
+
     data.value = (res as any)?.data || null
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'Failed to load widget'

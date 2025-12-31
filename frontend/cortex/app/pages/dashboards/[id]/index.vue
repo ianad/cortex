@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, nextTick, reactive } from 'vue'
+import { computed, ref, watch, onMounted, nextTick, reactive, provide } from 'vue'
 import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card'
 import { Button } from '~/components/ui/button'
 import { Badge } from '~/components/ui/badge'
@@ -21,6 +21,8 @@ import DashboardViewSelector from '~/components/dashboards/DashboardViewSelector
 import DashboardViewUpsert from '~/components/dashboards/DashboardViewUpsert.vue'
 import FilterPanel from '~/components/filters/FilterPanel.vue'
 import type { ColumnInfo } from '~/components/filters/FilterEditor.vue'
+import { useFilterContext } from '~/composables/useFilterContext'
+import type { SemanticFilter } from '~/types/output-formats'
 
 // Page metadata
 definePageMeta({
@@ -34,15 +36,16 @@ const router = useRouter()
 const dashboardId = route.params.id as string
 
 // Composables
-const { 
-  currentDashboard, 
-  loading, 
-  error, 
-  fetchDashboard, 
+const {
+  currentDashboard,
+  loading,
+  error,
+  fetchDashboard,
   updateDashboard,
   setDefaultView,
   getDefaultView,
-  getViewById 
+  getViewById,
+  executeWidgetWithFilters
 } = useDashboards()
 const { generateAlias } = useAliasGenerator()
 const { metrics, fetchMetrics } = useMetrics()
@@ -166,6 +169,38 @@ const hasNoCurrentView = computed(() => !!dashboard.value && !currentView.value)
 const pageTitle = computed(() => {
   return dashboard.value?.name || 'Dashboard'
 })
+
+// Filter context - initialized with dashboard ID and current view alias
+// This creates a filter context that syncs with the FilterPanel via localStorage
+const filterContextViewAlias = computed(() => currentView.value?.alias || '')
+const filterContext = computed(() => {
+  return useFilterContext(dashboardId, filterContextViewAlias.value)
+})
+
+// Provide filter context to child components (ViewWidget can use this for filtered execution)
+provide('filterContext', filterContext)
+provide('dashboardId', dashboardId)
+
+// State for tracking filter-triggered executions
+const isFilterExecuting = ref(false)
+const widgetResults = ref<Map<string, any>>(new Map())
+
+/**
+ * Updates widget data in local state after filtered execution
+ */
+function updateWidgetData(widgetAlias: string, data: any) {
+  widgetResults.value.set(widgetAlias, data)
+}
+
+/**
+ * Gets stored widget results for a specific widget
+ */
+function getWidgetResults(widgetAlias: string) {
+  return widgetResults.value.get(widgetAlias)
+}
+
+// Provide widget results getter to child components
+provide('getWidgetResults', getWidgetResults)
 
 // Auto-generate alias from section title
 watch(() => addSectionForm.title, (newTitle) => {
@@ -498,15 +533,76 @@ function editDashboard() {
 
 /**
  * Handle filters changed event from FilterPanel
- * This is a stub for now - Task 11 will implement the full logic
- * to refresh widgets with the new filters
+ * Re-executes all widgets in the current view with the updated filters
  */
-function handleFiltersChanged() {
-  console.log('[Dashboard] Filters changed - will trigger widget refresh in Task 11')
-  // TODO: Task 11 will implement:
-  // 1. Get the current filter context
-  // 2. Trigger refresh of all widgets with the new filters
-  // 3. Use executeWidgetWithFilters for each widget
+async function handleFiltersChanged() {
+  if (!currentView.value || !currentDashboard.value) return
+
+  console.log('[Dashboard] Filters changed - triggering widget refresh with filters')
+  isFilterExecuting.value = true
+
+  try {
+    // Get all widgets in current view and execute them with filters
+    const executionPromises: Promise<void>[] = []
+
+    for (const section of currentView.value.sections) {
+      for (const widget of section.widgets) {
+        // Get effective filters for this widget from filter context
+        // getFiltersForApi returns SemanticFilter[] format, but executeWidgetWithFilters
+        // expects a slightly different format with 'dimension' instead of 'name'
+        const semanticFilters = filterContext.value.getFiltersForApi(widget.alias)
+        const filters = semanticFilters.map(f => ({
+          dimension: f.name || f.query, // SemanticFilter uses 'name' and 'query' for dimension
+          operator: f.operator || 'equals',
+          value: f.value,
+          values: f.values,
+          min_value: f.min_value,
+          max_value: f.max_value,
+          table: f.table,
+          value_type: f.value_type,
+          filter_type: f.filter_type,
+          is_active: f.is_active
+        }))
+
+        console.log(`[Dashboard] Executing widget ${widget.alias} with ${filters.length} filters`)
+
+        // Create a promise for this widget's execution
+        const executePromise = (async () => {
+          try {
+            const result = await executeWidgetWithFilters(
+              currentDashboard.value!.id,
+              currentView.value!.alias,
+              widget.alias,
+              filters
+            )
+
+            // Update widget data in local state
+            updateWidgetData(widget.alias, result.data)
+          } catch (error) {
+            console.error(`Failed to execute widget ${widget.alias}:`, error)
+            // Don't throw - we want other widgets to continue executing
+          }
+        })()
+
+        executionPromises.push(executePromise)
+      }
+    }
+
+    // Wait for all widget executions to complete
+    await Promise.all(executionPromises)
+
+    // Increment refresh key to trigger ViewWidget re-renders
+    // This ensures widgets that didn't have filters still refresh properly
+    refreshKey.value++
+
+    lastExecutionTime.value = new Date().toLocaleTimeString()
+    console.log('[Dashboard] All widgets refreshed with filters')
+  } catch (error) {
+    console.error('[Dashboard] Error refreshing widgets with filters:', error)
+    toast.error('Failed to apply filters to some widgets')
+  } finally {
+    isFilterExecuting.value = false
+  }
 }
 
 function goBack() {
