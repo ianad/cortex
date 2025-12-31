@@ -7,15 +7,13 @@ from cortex.api.schemas.requests.dashboards import (
     DashboardCreateRequest, DashboardUpdateRequest, SetDefaultViewRequest
 )
 from cortex.api.schemas.requests.filters import (
-    RuntimeFilterRequest,
     WidgetExecutionWithFiltersRequest,
-    DashboardExecutionWithFiltersRequest
 )
 from cortex.api.schemas.responses.dashboards import (
     DashboardResponse, DashboardListResponse, DashboardExecutionResponse, DashboardViewExecutionResponse,
     WidgetExecutionResponse
 )
-from cortex.core.filters.converter import runtime_filter_to_semantic, merge_filters
+from cortex.core.filters.converter import runtime_filter_to_semantic
 from cortex.core.semantics.metrics.modifiers import MetricModifier, MetricModifiers
 from cortex.core.dashboards.dashboard import Dashboard
 from cortex.core.dashboards.db.dashboard_service import DashboardCRUD
@@ -455,8 +453,7 @@ async def execute_widget_with_filters(
     Execute a specific widget with runtime filter overrides.
 
     This endpoint allows dynamic filtering without modifying the widget configuration.
-    Runtime filters are merged with (or replace) the widget's existing filters based
-    on the replace_filters flag.
+    Runtime filters are applied as modifiers on top of the widget's base configuration.
 
     Use cases:
     - Interactive "slice" filtering on dashboards

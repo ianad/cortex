@@ -85,10 +85,6 @@ class WidgetExecutionWithFiltersRequest(BaseModel):
         default=None,
         description="Override the result limit for the query"
     )
-    replace_filters: bool = Field(
-        default=False,
-        description="If True, replace all existing filters; if False, merge with existing filters"
-    )
 
     model_config = ConfigDict(use_enum_values=True)
 
