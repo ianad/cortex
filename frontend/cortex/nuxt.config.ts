@@ -3,6 +3,14 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
+  components: {
+    dirs: [
+      {
+        path: '~/components',
+        ignore: ['**/index.ts'],
+      },
+    ],
+  },
   devtools: {
     enabled: true,
 
