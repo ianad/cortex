@@ -574,16 +574,18 @@ useHead({
 
     <!-- View Management Dialogs -->
     <DashboardViewUpsert
+      v-if="dashboardForUi"
       v-model:open="showAddViewDialog"
       mode="create"
-      :dashboard="dashboardForUi as unknown as Dashboard"
+      :dashboard="dashboardForUi"
       @view-created="handleViewCreated"
     />
-    
+
     <DashboardViewUpsert
+      v-if="dashboardForUi"
       v-model:open="showEditViewDialog"
       mode="edit"
-      :dashboard="dashboardForUi as unknown as Dashboard"
+      :dashboard="dashboardForUi"
       :view-to-edit="editingView || undefined"
       @view-updated="handleViewUpdated"
     />
