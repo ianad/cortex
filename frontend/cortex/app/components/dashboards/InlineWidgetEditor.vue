@@ -17,7 +17,7 @@ import {
 import { toast } from 'vue-sonner'
 
 import MetricSelector from '~/components/MetricSelector.vue'
-import MetricSchemaBuilder from '~/components/metric-builder/MetricSchemaBuilder.vue'
+import MetricSchemaBuilder from '~/components/metric/builder/MetricSchemaBuilder.vue'
 import DataMappingEditor from './DataMappingEditor.vue'
 import VisualizationTypeSelector from './VisualizationTypeSelector.vue'
 import GridSizeSelector from './GridSizeSelector.vue'
