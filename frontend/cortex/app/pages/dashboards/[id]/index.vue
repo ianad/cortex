@@ -184,6 +184,8 @@ provide('dashboardId', dashboardId)
 // State for tracking filter-triggered executions
 const isFilterExecuting = ref(false)
 const widgetResults = ref<Map<string, any>>(new Map())
+const widgetLoadingStates = ref<Map<string, boolean>>(new Map())
+const widgetErrors = ref<Map<string, string>>(new Map())
 
 /**
  * Updates widget data in local state after filtered execution
@@ -201,6 +203,28 @@ function getWidgetResults(widgetAlias: string) {
 
 // Provide widget results getter to child components
 provide('getWidgetResults', getWidgetResults)
+
+// Provide loading and error states to child components
+provide('widgetLoadingStates', widgetLoadingStates)
+provide('widgetErrors', widgetErrors)
+
+/**
+ * Check if a widget is currently loading
+ */
+function isWidgetLoading(widgetAlias: string): boolean {
+  return widgetLoadingStates.value.get(widgetAlias) || false
+}
+
+/**
+ * Get the error message for a widget, if any
+ */
+function getWidgetError(widgetAlias: string): string | null {
+  return widgetErrors.value.get(widgetAlias) || null
+}
+
+// Provide helper functions to child components
+provide('isWidgetLoading', isWidgetLoading)
+provide('getWidgetError', getWidgetError)
 
 // Auto-generate alias from section title
 watch(() => addSectionForm.title, (newTitle) => {
@@ -531,60 +555,60 @@ async function handleFiltersChanged() {
 
   isFilterExecuting.value = true
 
-  try {
-    // Get all widgets in current view and execute them with filters
-    const executionPromises: Promise<void>[] = []
+  const widgetPromises: Promise<void>[] = []
 
-    for (const section of currentView.value.sections) {
-      for (const widget of section.widgets) {
-        // Get effective filters for this widget from filter context
-        // getFiltersForApi returns SemanticFilter[] format, but executeWidgetWithFilters
-        // expects a slightly different format with 'dimension' instead of 'name'
-        const semanticFilters = filterContext.value.getFiltersForApi(widget.alias)
-        const filters = semanticFilters.map(f => ({
-          dimension: f.name || f.query, // SemanticFilter uses 'name' and 'query' for dimension
-          operator: f.operator || 'equals',
-          value: f.value,
-          values: f.values,
-          min_value: f.min_value,
-          max_value: f.max_value,
-          table: f.table,
-          value_type: f.value_type,
-          filter_type: f.filter_type,
-          is_active: f.is_active
-        }))
+  for (const section of currentView.value.sections) {
+    for (const widget of section.widgets) {
+      // Mark widget as loading and clear any previous error
+      // Use new Map() pattern to ensure reactivity triggers
+      widgetLoadingStates.value = new Map(widgetLoadingStates.value.set(widget.alias, true))
+      const newErrors = new Map(widgetErrors.value)
+      newErrors.delete(widget.alias)
+      widgetErrors.value = newErrors
 
+      // Get effective filters for this widget from filter context
+      // getFiltersForApi returns SemanticFilter[] format, but executeWidgetWithFilters
+      // expects a slightly different format with 'dimension' instead of 'name'
+      const semanticFilters = filterContext.value.getFiltersForApi(widget.alias)
+      const apiFilters = semanticFilters.map((f: any) => ({
+        dimension: f.name || f.query, // SemanticFilter uses 'name' and 'query' for dimension
+        operator: f.operator || 'equals',
+        value: f.value,
+        values: f.values,
+        min_value: f.min_value,
+        max_value: f.max_value,
+        table: f.table,
+        value_type: f.value_type || 'string',
+        filter_type: f.filter_type || 'where',
+        is_active: f.is_active ?? true
+      }))
 
-        // Create a promise for this widget's execution
-        const executePromise = (async () => {
-          try {
-            const result = await executeWidgetWithFilters(
-              currentDashboard.value!.id,
-              currentView.value!.alias,
-              widget.alias,
-              filters
-            )
+      // Create a promise for this widget's execution with proper error handling
+      const promise = executeWidgetWithFilters(
+        currentDashboard.value!.id,
+        currentView.value!.alias,
+        widget.alias,
+        apiFilters
+      ).then(result => {
+        // Update widget data in local state on success
+        updateWidgetData(widget.alias, result.data)
+      }).catch((error: any) => {
+        // Store error message for this widget
+        widgetErrors.value = new Map(widgetErrors.value.set(widget.alias, error.message || 'Execution failed'))
+      }).finally(() => {
+        // Mark widget as no longer loading
+        widgetLoadingStates.value = new Map(widgetLoadingStates.value.set(widget.alias, false))
+      })
 
-            // Update widget data in local state
-            updateWidgetData(widget.alias, result.data)
-          } catch (_error) {
-            // Don't throw - we want other widgets to continue executing
-          }
-        })()
-
-        executionPromises.push(executePromise)
-      }
+      widgetPromises.push(promise)
     }
-
-    // Wait for all widget executions to complete
-    await Promise.all(executionPromises)
-
-    lastExecutionTime.value = new Date().toLocaleTimeString()
-  } catch (err) {
-    toast.error('Failed to apply filters to some widgets')
-  } finally {
-    isFilterExecuting.value = false
   }
+
+  // Wait for all widget executions to complete
+  await Promise.all(widgetPromises)
+
+  isFilterExecuting.value = false
+  lastExecutionTime.value = new Date().toLocaleTimeString()
 }
 
 function goBack() {
@@ -701,13 +725,23 @@ useHead({
     </div>
 
     <!-- Filter Panel -->
-    <FilterPanel
-      v-if="currentDashboard && currentView"
-      :dashboard-id="currentDashboard.id"
-      :view-alias="currentView.alias"
-      :available-columns="availableColumns"
-      @filters-changed="handleFiltersChanged"
-    />
+    <div class="relative">
+      <FilterPanel
+        v-if="currentDashboard && currentView"
+        :dashboard-id="currentDashboard.id"
+        :view-alias="currentView.alias"
+        :available-columns="availableColumns"
+        @filters-changed="handleFiltersChanged"
+      />
+      <!-- Global filter execution indicator -->
+      <div
+        v-if="isFilterExecuting"
+        class="absolute top-0 right-0 flex items-center gap-2 px-3 py-1 text-sm text-muted-foreground bg-background/80 rounded-bl-md border-l border-b"
+      >
+        <RefreshCw class="w-3 h-3 animate-spin" />
+        Applying filters...
+      </div>
+    </div>
 
     <!-- Loading State -->
     <div v-if="loading" class="flex items-center justify-center py-12">
