@@ -300,16 +300,75 @@ export function useDashboards() {
   async function executeWidget(dashboardId: string, viewId: string, widgetId: string) {
     loading.value = true
     error.value = null
-    
+
     try {
       const result = await $fetch<WidgetExecutionResult>(
         apiUrl(`/api/v1/dashboards/${dashboardId}/views/${viewId}/widgets/${widgetId}/execute`),
         { method: 'POST' }
       )
-      
+
       return result
     } catch (err: any) {
       error.value = err.message || 'Failed to execute widget'
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function executeWidgetWithFilters(
+    dashboardId: string,
+    viewId: string,
+    widgetId: string,
+    filters?: Array<{
+      dimension: string
+      operator: string
+      value?: any
+      values?: any[]
+      min_value?: any
+      max_value?: any
+      table?: string
+      value_type?: string
+      filter_type?: string
+      is_active?: boolean
+    }>,
+    options?: {
+      parameters?: Record<string, any>
+      context_id?: string
+      limit?: number
+    }
+  ) {
+    loading.value = true
+    error.value = null
+
+    try {
+      const result = await $fetch<WidgetExecutionResult>(
+        apiUrl(`/api/v1/dashboards/${dashboardId}/views/${viewId}/widgets/${widgetId}/execute/filtered`),
+        {
+          method: 'POST',
+          body: {
+            filters: filters?.map(f => ({
+              dimension: f.dimension,
+              operator: f.operator || 'equals',
+              value: f.value,
+              values: f.values,
+              min_value: f.min_value,
+              max_value: f.max_value,
+              table: f.table,
+              value_type: f.value_type || 'string',
+              filter_type: f.filter_type || 'where',
+              is_active: f.is_active ?? true
+            })),
+            parameters: options?.parameters,
+            context_id: options?.context_id,
+            limit: options?.limit
+          }
+        }
+      )
+
+      return result
+    } catch (err: any) {
+      error.value = err.message || 'Failed to execute widget with filters'
       throw err
     } finally {
       loading.value = false
@@ -471,6 +530,7 @@ export function useDashboards() {
     setDefaultView,
     executeDashboard,
     executeWidget,
+    executeWidgetWithFilters,
     deleteWidget,
     previewDashboardConfig,
     

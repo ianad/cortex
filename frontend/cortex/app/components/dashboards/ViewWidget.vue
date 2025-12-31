@@ -45,7 +45,10 @@ async function load() {
     loading.value = true
     error.value = null
     data.value = null
+
+    // Execute widget - filter handling is done by parent dashboard page via handleFiltersChanged
     const res = await executeWidget(props.dashboardId, props.viewAlias, props.widget.alias)
+
     data.value = (res as any)?.data || null
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'Failed to load widget'
