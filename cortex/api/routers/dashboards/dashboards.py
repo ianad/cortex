@@ -6,10 +6,15 @@ from fastapi import APIRouter, HTTPException, status
 from cortex.api.schemas.requests.dashboards import (
     DashboardCreateRequest, DashboardUpdateRequest, SetDefaultViewRequest
 )
+from cortex.api.schemas.requests.filters import (
+    WidgetExecutionWithFiltersRequest,
+)
 from cortex.api.schemas.responses.dashboards import (
     DashboardResponse, DashboardListResponse, DashboardExecutionResponse, DashboardViewExecutionResponse,
     WidgetExecutionResponse
 )
+from cortex.core.filters.converter import runtime_filter_to_semantic
+from cortex.core.semantics.metrics.modifiers import MetricModifier, MetricModifiers
 from cortex.core.dashboards.dashboard import Dashboard
 from cortex.core.dashboards.db.dashboard_service import DashboardCRUD
 from cortex.core.dashboards.execution import DashboardExecutionService
@@ -433,6 +438,127 @@ async def execute_widget(dashboard_id: UUID, view_alias: str, widget_alias: str)
         )
 
 
+@DashboardRouter.post(
+    "/dashboards/{dashboard_id}/views/{view_alias}/widgets/{widget_alias}/execute/filtered",
+    response_model=WidgetExecutionResponse,
+    tags=["Dashboards", "Filters"]
+)
+async def execute_widget_with_filters(
+    dashboard_id: UUID,
+    view_alias: str,
+    widget_alias: str,
+    request: WidgetExecutionWithFiltersRequest
+):
+    """
+    Execute a specific widget with runtime filter overrides.
+
+    This endpoint allows dynamic filtering without modifying the widget configuration.
+    Runtime filters are applied as modifiers on top of the widget's base configuration.
+
+    Use cases:
+    - Interactive "slice" filtering on dashboards
+    - Cross-widget filtering (clicking on one widget filters others)
+    - User-applied filters without admin privileges
+    """
+    try:
+        # Get dashboard
+        dashboard = DashboardCRUD.get_dashboard_by_id(dashboard_id)
+        if dashboard is None:
+            raise DashboardDoesNotExistError(dashboard_id)
+
+        # Find view
+        view = next((v for v in dashboard.views if v.alias == view_alias), None)
+        if view is None:
+            raise DashboardViewDoesNotExistError(view_alias)
+
+        # Find widget
+        widget = None
+        for section in view.sections:
+            widget = next((w for w in section.widgets if w.alias == widget_alias), None)
+            if widget:
+                break
+
+        if widget is None:
+            raise WidgetExecutionError(widget_alias, f"Widget '{widget_alias}' not found in view '{view_alias}'")
+
+        # Convert runtime filters to SemanticFilter instances
+        runtime_semantic_filters = []
+        if request.filters:
+            for rf in request.filters:
+                if rf.is_active:
+                    runtime_semantic_filters.append(runtime_filter_to_semantic(
+                        dimension=rf.dimension,
+                        operator=rf.operator,
+                        value=rf.value,
+                        values=rf.values,
+                        min_value=rf.min_value,
+                        max_value=rf.max_value,
+                        table=rf.table,
+                        value_type=rf.value_type,
+                        filter_type=rf.filter_type,
+                        is_active=True,
+                    ))
+
+        # Build metric modifiers with runtime filters
+        modifier = MetricModifier(
+            filters=runtime_semantic_filters if runtime_semantic_filters else None,
+            limit=request.limit,
+        )
+        modifiers: MetricModifiers = [modifier] if runtime_semantic_filters or request.limit else None
+
+        # Determine context and parameters
+        context_id = request.context_id or (widget.metric_overrides.context_id if widget.metric_overrides else None) or view.context_id
+        parameters = request.parameters or (widget.metric_overrides.parameters if widget.metric_overrides else None)
+
+        # Execute the metric - support both metric_id and embedded metric
+        execution_kwargs = {
+            "context_id": context_id,
+            "parameters": parameters,
+            "modifiers": modifiers,
+        }
+
+        if widget.metric:
+            # Use embedded metric
+            execution_kwargs["metric"] = widget.metric
+        elif widget.metric_id:
+            # Use metric reference
+            execution_kwargs["metric_id"] = widget.metric_id
+        else:
+            raise WidgetExecutionError(widget_alias, "Widget must have either metric_id or embedded metric")
+
+        execution_result = MetricExecutionService.execute_metric(**execution_kwargs)
+
+        if not execution_result.get("success"):
+            data_payload = _create_error_chart_data(execution_result.get("error", "Metric execution failed"))
+            return WidgetExecutionResponse(
+                widget_alias=widget_alias,
+                data=data_payload,
+                execution_time_ms=execution_result.get("metadata", {}).get("execution_time_ms", 0.0),
+                error=execution_result.get("error")
+            )
+
+        metric_result = _convert_to_metric_execution_result(execution_result)
+
+        # Transform data using the same mapper as preview
+        transformed_data = _transform_widget_data_with_mapping(widget, metric_result)
+
+        return WidgetExecutionResponse(
+            widget_alias=widget_alias,
+            data=transformed_data,
+            execution_time_ms=execution_result.get("metadata", {}).get("execution_time_ms", 0.0),
+            error=None
+        )
+
+    except DashboardDoesNotExistError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except DashboardViewDoesNotExistError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except WidgetExecutionError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
 @DashboardRouter.delete(
     "/dashboards/{dashboard_id}/views/{view_alias}/widgets/{widget_alias}",
     response_model=DashboardResponse,
@@ -440,7 +566,7 @@ async def execute_widget(dashboard_id: UUID, view_alias: str, widget_alias: str)
 )
 async def delete_widget(dashboard_id: UUID, view_alias: str, widget_alias: str):
     """Delete a specific widget from a dashboard view.
-    
+
     Returns the updated dashboard configuration after widget removal.
     """
     try:

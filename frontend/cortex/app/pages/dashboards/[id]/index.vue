@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, nextTick, reactive } from 'vue'
+import { computed, ref, watch, onMounted, nextTick, reactive, provide } from 'vue'
 import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card'
 import { Button } from '~/components/ui/button'
 import { Badge } from '~/components/ui/badge'
@@ -19,6 +19,10 @@ import DashboardContainer from '~/components/dashboards/DashboardContainer.vue'
 import WidgetEditSheet from '~/components/dashboards/WidgetEditSheet.vue'
 import DashboardViewSelector from '~/components/dashboards/DashboardViewSelector.vue'
 import DashboardViewUpsert from '~/components/dashboards/DashboardViewUpsert.vue'
+import FilterPanel from '~/components/filters/FilterPanel.vue'
+import type { ColumnInfo } from '~/components/filters/FilterEditor.vue'
+import { useFilterContext } from '~/composables/useFilterContext'
+import type { SemanticFilter } from '~/types/output-formats'
 
 // Page metadata
 definePageMeta({
@@ -32,15 +36,16 @@ const router = useRouter()
 const dashboardId = route.params.id as string
 
 // Composables
-const { 
-  currentDashboard, 
-  loading, 
-  error, 
-  fetchDashboard, 
+const {
+  currentDashboard,
+  loading,
+  error,
+  fetchDashboard,
   updateDashboard,
   setDefaultView,
   getDefaultView,
-  getViewById 
+  getViewById,
+  executeWidgetWithFilters
 } = useDashboards()
 const { generateAlias } = useAliasGenerator()
 const { metrics, fetchMetrics } = useMetrics()
@@ -48,6 +53,86 @@ const { selectedEnvironmentId } = useEnvironments()
 
 // Metrics count for dynamic tab ordering in inline widget editor
 const metricsCount = computed(() => metrics.value?.length || 0)
+
+// Available columns for FilterPanel - extract unique dimension fields from widget configurations
+const availableColumns = computed<ColumnInfo[]>(() => {
+  const columns: ColumnInfo[] = []
+  const seenFields = new Set<string>()
+
+  if (!currentView.value) return columns
+
+  // Iterate through all sections and widgets to extract dimension fields
+  for (const section of currentView.value.sections || []) {
+    for (const widget of section.widgets || []) {
+      const dataMapping = widget.visualization?.data_mapping
+      if (!dataMapping) continue
+
+      // Extract x_axis field (typically a dimension)
+      if (dataMapping.x_axis?.field && !seenFields.has(dataMapping.x_axis.field)) {
+        seenFields.add(dataMapping.x_axis.field)
+        columns.push({
+          name: dataMapping.x_axis.field,
+          type: dataMapping.x_axis.data_type || 'string'
+        })
+      }
+
+      // Extract category_field (dimension for pie/donut charts)
+      if (dataMapping.category_field?.field && !seenFields.has(dataMapping.category_field.field)) {
+        seenFields.add(dataMapping.category_field.field)
+        columns.push({
+          name: dataMapping.category_field.field,
+          type: dataMapping.category_field.data_type || 'categorical'
+        })
+      }
+
+      // Extract series_field (dimension for multi-series charts)
+      if (dataMapping.series_field?.field && !seenFields.has(dataMapping.series_field.field)) {
+        seenFields.add(dataMapping.series_field.field)
+        columns.push({
+          name: dataMapping.series_field.field,
+          type: dataMapping.series_field.data_type || 'categorical'
+        })
+      }
+
+      // Extract y_axes fields (measures - can also be filtered)
+      if (Array.isArray(dataMapping.y_axes)) {
+        for (const yAxis of dataMapping.y_axes) {
+          if (yAxis.field && !seenFields.has(yAxis.field)) {
+            seenFields.add(yAxis.field)
+            columns.push({
+              name: yAxis.field,
+              type: yAxis.data_type || 'number'
+            })
+          }
+        }
+      }
+
+      // Extract value_field (for single value widgets)
+      if (dataMapping.value_field?.field && !seenFields.has(dataMapping.value_field.field)) {
+        seenFields.add(dataMapping.value_field.field)
+        columns.push({
+          name: dataMapping.value_field.field,
+          type: dataMapping.value_field.data_type || 'number'
+        })
+      }
+
+      // Extract table columns
+      if (Array.isArray(dataMapping.columns)) {
+        for (const col of dataMapping.columns) {
+          if (col.field && !seenFields.has(col.field)) {
+            seenFields.add(col.field)
+            columns.push({
+              name: col.field,
+              type: 'string' // Table columns don't have explicit type in ColumnMapping
+            })
+          }
+        }
+      }
+    }
+  }
+
+  return columns
+})
 
 // Component state
 const selectedViewId = ref<string>('')
@@ -85,6 +170,62 @@ const pageTitle = computed(() => {
   return dashboard.value?.name || 'Dashboard'
 })
 
+// Filter context - initialized with dashboard ID and current view alias
+// This creates a filter context that syncs with the FilterPanel via localStorage
+const filterContextViewAlias = computed(() => currentView.value?.alias || '')
+const filterContext = computed(() => {
+  return useFilterContext(dashboardId, filterContextViewAlias.value)
+})
+
+// Provide filter context to child components (ViewWidget can use this for filtered execution)
+provide('filterContext', filterContext)
+provide('dashboardId', dashboardId)
+
+// State for tracking filter-triggered executions
+const isFilterExecuting = ref(false)
+const widgetResults = ref<Map<string, any>>(new Map())
+const widgetLoadingStates = ref<Map<string, boolean>>(new Map())
+const widgetErrors = ref<Map<string, string>>(new Map())
+
+/**
+ * Updates widget data in local state after filtered execution
+ */
+function updateWidgetData(widgetAlias: string, data: any) {
+  widgetResults.value.set(widgetAlias, data)
+}
+
+/**
+ * Gets stored widget results for a specific widget
+ */
+function getWidgetResults(widgetAlias: string) {
+  return widgetResults.value.get(widgetAlias)
+}
+
+// Provide widget results getter to child components
+provide('getWidgetResults', getWidgetResults)
+
+// Provide loading and error states to child components
+provide('widgetLoadingStates', widgetLoadingStates)
+provide('widgetErrors', widgetErrors)
+
+/**
+ * Check if a widget is currently loading
+ */
+function isWidgetLoading(widgetAlias: string): boolean {
+  return widgetLoadingStates.value.get(widgetAlias) || false
+}
+
+/**
+ * Get the error message for a widget, if any
+ */
+function getWidgetError(widgetAlias: string): string | null {
+  return widgetErrors.value.get(widgetAlias) || null
+}
+
+// Provide helper functions to child components
+provide('isWidgetLoading', isWidgetLoading)
+provide('getWidgetError', getWidgetError)
+
 // Auto-generate alias from section title
 watch(() => addSectionForm.title, (newTitle) => {
   if (newTitle) {
@@ -94,12 +235,9 @@ watch(() => addSectionForm.title, (newTitle) => {
 
 // Utility function to clean dashboard data for API requests
 function cleanDashboardForUpdate(dashboard: any): any {
-  console.log('Dashboard before cleaning:', dashboard)
-  
   const cleaned = {
     ...dashboard,
     views: dashboard.views?.map((view: any) => {
-      console.log('Processing view:', view)
       // Generate view alias if missing
       const viewAlias = view.alias || generateAlias(view.title || view.name || `view_${Date.now()}`)
       
@@ -110,7 +248,6 @@ function cleanDashboardForUpdate(dashboard: any): any {
         context_id: view.context_id,
         layout: view.layout,
         sections: view.sections?.map((section: any) => {
-          console.log('Processing section:', section)
           // Handle both old (id) and new (alias) section structures
           const sectionAlias = section.alias || generateAlias(section.title || `section_${Date.now()}`)
           
@@ -183,18 +320,15 @@ function cleanDashboardForUpdate(dashboard: any): any {
               return cleanedWidget
             }) || []
           }
-          
-          console.log('Cleaned section:', cleanedSection)
+
           return cleanedSection
         }) || []
       }
       
-      console.log('Cleaned view:', cleanedView)
       return cleanedView
     }) || []
   }
-  
-  console.log('Dashboard after cleaning:', cleaned)
+
   return cleaned
 }
 
@@ -323,7 +457,6 @@ async function handleDeleteView(view: DashboardView) {
     toast.success('View deleted successfully')
     await loadDashboard()
   } catch (err: any) {
-    console.error('Failed to delete view:', err)
     toast.error(err?.message || 'Failed to delete view')
   }
 }
@@ -352,7 +485,6 @@ async function addSection() {
   
   // Check if alias already exists in current view
   const existingSections = mutable.views[viewIndex]?.sections ?? []
-  console.log('Existing sections before adding:', existingSections)
   
   // Check for alias conflicts (handle both old id and new alias structures)
   if (existingSections.some(s => (s.alias && s.alias === alias) || (s.title && generateAlias(s.title) === alias))) {
@@ -412,6 +544,71 @@ async function addSection() {
 
 function editDashboard() {
   toast.info('Edit functionality coming soon')
+}
+
+/**
+ * Handle filters changed event from FilterPanel
+ * Re-executes all widgets in the current view with the updated filters
+ */
+async function handleFiltersChanged() {
+  if (!currentView.value || !currentDashboard.value) return
+
+  isFilterExecuting.value = true
+
+  const widgetPromises: Promise<void>[] = []
+
+  for (const section of currentView.value.sections) {
+    for (const widget of section.widgets) {
+      // Mark widget as loading and clear any previous error
+      // Use new Map() pattern to ensure reactivity triggers
+      widgetLoadingStates.value = new Map(widgetLoadingStates.value.set(widget.alias, true))
+      const newErrors = new Map(widgetErrors.value)
+      newErrors.delete(widget.alias)
+      widgetErrors.value = newErrors
+
+      // Get effective filters for this widget from filter context
+      // getFiltersForApi returns SemanticFilter[] format, but executeWidgetWithFilters
+      // expects a slightly different format with 'dimension' instead of 'name'
+      const semanticFilters = filterContext.value.getFiltersForApi(widget.alias)
+      const apiFilters = semanticFilters.map((f: any) => ({
+        dimension: f.name || f.query, // SemanticFilter uses 'name' and 'query' for dimension
+        operator: f.operator || 'equals',
+        value: f.value,
+        values: f.values,
+        min_value: f.min_value,
+        max_value: f.max_value,
+        table: f.table,
+        value_type: f.value_type || 'string',
+        filter_type: f.filter_type || 'where',
+        is_active: f.is_active ?? true
+      }))
+
+      // Create a promise for this widget's execution with proper error handling
+      const promise = executeWidgetWithFilters(
+        currentDashboard.value!.id,
+        currentView.value!.alias,
+        widget.alias,
+        apiFilters
+      ).then(result => {
+        // Update widget data in local state on success
+        updateWidgetData(widget.alias, result.data)
+      }).catch((error: any) => {
+        // Store error message for this widget
+        widgetErrors.value = new Map(widgetErrors.value.set(widget.alias, error.message || 'Execution failed'))
+      }).finally(() => {
+        // Mark widget as no longer loading
+        widgetLoadingStates.value = new Map(widgetLoadingStates.value.set(widget.alias, false))
+      })
+
+      widgetPromises.push(promise)
+    }
+  }
+
+  // Wait for all widget executions to complete
+  await Promise.all(widgetPromises)
+
+  isFilterExecuting.value = false
+  lastExecutionTime.value = new Date().toLocaleTimeString()
 }
 
 function goBack() {
@@ -527,6 +724,24 @@ useHead({
       </div>
     </div>
 
+    <!-- Filter Panel -->
+    <div class="relative">
+      <FilterPanel
+        v-if="currentDashboard && currentView"
+        :dashboard-id="currentDashboard.id"
+        :view-alias="currentView.alias"
+        :available-columns="availableColumns"
+        @filters-changed="handleFiltersChanged"
+      />
+      <!-- Global filter execution indicator -->
+      <div
+        v-if="isFilterExecuting"
+        class="absolute top-0 right-0 flex items-center gap-2 px-3 py-1 text-sm text-muted-foreground bg-background/80 rounded-bl-md border-l border-b"
+      >
+        <RefreshCw class="w-3 h-3 animate-spin" />
+        Applying filters...
+      </div>
+    </div>
 
     <!-- Loading State -->
     <div v-if="loading" class="flex items-center justify-center py-12">
